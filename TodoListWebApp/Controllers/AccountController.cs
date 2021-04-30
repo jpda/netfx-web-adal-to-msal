@@ -25,10 +25,11 @@ using Microsoft.Owin.Security;
 using Microsoft.Owin.Security.OpenIdConnect;
 using Microsoft.Owin.Security.Cookies;
 using TodoListWebApp.Utils;
-using Microsoft.IdentityModel.Clients.ActiveDirectory;
 using System.Security.Claims;
 using System.Configuration;
 using System.Globalization;
+using Microsoft.Identity.Client;
+using System.Threading.Tasks;
 
 namespace TodoListWebApp.Controllers
 {
@@ -42,27 +43,31 @@ namespace TodoListWebApp.Controllers
                 HttpContext.GetOwinContext().Authentication.Challenge(new AuthenticationProperties { RedirectUri = "/" }, OpenIdConnectAuthenticationDefaults.AuthenticationType);
             }
         }
-        public void SignOut()
+        public async Task SignOut()
         {
+            //todo: ADAL
             // Remove all cache entries for this user and send an OpenID Connect sign-out request.
+
             string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
-            AuthenticationContext authContext = new AuthenticationContext(Startup.Authority, new NaiveSessionCache(userObjectID));
-            authContext.TokenCache.Clear();
+            var msal = MsalBuilder.Get(userObjectID);
+            var account = await msal.GetAccountAsync(userObjectID);
+            await msal.RemoveAsync(account);
 
             HttpContext.GetOwinContext().Authentication.SignOut(
                 OpenIdConnectAuthenticationDefaults.AuthenticationType, CookieAuthenticationDefaults.AuthenticationType);
         }
-        
-        public void EndSession()
+
+        public async Task EndSession()
         {
+            // todo: ADAL
             if (HttpContext.Request.IsAuthenticated)
             {
-                // Remove all cache entries for this user and send an OpenID Connect sign-out request.
                 string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
-                AuthenticationContext authContext = new AuthenticationContext(Startup.Authority, new NaiveSessionCache(userObjectID));
-                authContext.TokenCache.Clear();
+                var msal = MsalBuilder.Get(userObjectID);
+                var account = await msal.GetAccountAsync(userObjectID);
+                await msal.RemoveAsync(account);
             }
-            
+
             // If AAD sends a single sign-out message to the app, end the user's session, but don't redirect to AAD for sign out.
             HttpContext.GetOwinContext().Authentication.SignOut(CookieAuthenticationDefaults.AuthenticationType);
         }

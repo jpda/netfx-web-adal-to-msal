@@ -30,7 +30,7 @@ using Microsoft.Owin.Security.OpenIdConnect;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using Newtonsoft.Json;
-using Microsoft.IdentityModel.Clients.ActiveDirectory;
+using Microsoft.Identity.Client;
 using Microsoft.Owin.Security;
 
 namespace TodoListWebApp.Controllers
@@ -52,10 +52,16 @@ namespace TodoListWebApp.Controllers
 
             try
             {
+                // todo: ADAL
                 string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
-                AuthenticationContext authContext = new AuthenticationContext(Startup.Authority, new NaiveSessionCache(userObjectID));
-                ClientCredential credential = new ClientCredential(clientId, appKey);
-                result = await authContext.AcquireTokenSilentAsync(todoListResourceId, credential, new UserIdentifier(userObjectID, UserIdentifierType.UniqueId));
+                var upn = ClaimsPrincipal.Current.FindFirst("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn").Value;
+
+                var msal = MsalBuilder.Get(userObjectID);
+                result = await msal.AcquireTokenSilent(
+                    new[] { $"{todoListResourceId}/.default" },
+                    upn)
+                .ExecuteAsync();
+
 
                 //
                 // Retrieve the user's To Do List.
@@ -92,10 +98,6 @@ namespace TodoListWebApp.Controllers
                     //
                     if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                     {
-                        var todoTokens = authContext.TokenCache.ReadItems().Where(a => a.Resource == todoListResourceId);
-                        foreach (TokenCacheItem tci in todoTokens)
-                            authContext.TokenCache.DeleteItem(tci);                            
-
                         ViewBag.ErrorMessage = "UnexpectedError";
                         TodoItem newItem = new TodoItem();
                         newItem.Title = "(No items in list)";
@@ -104,7 +106,7 @@ namespace TodoListWebApp.Controllers
                     }
                 }
             }
-            catch (AdalException ee)
+            catch (Exception ex)
             {
                 if (Request.QueryString["reauth"] == "True")
                 {
@@ -114,7 +116,9 @@ namespace TodoListWebApp.Controllers
                     // The OpenID Connect middleware will return to this controller after the sign-in response has been handled.
                     //
                     HttpContext.GetOwinContext().Authentication.Challenge(
-                        new AuthenticationProperties(),
+                        new AuthenticationProperties(
+                            new Dictionary<string, string>() { { "scopeNeeded", $"{todoListResourceId}" } }
+                        ),
                         OpenIdConnectAuthenticationDefaults.AuthenticationType);
                 }
 
@@ -149,12 +153,17 @@ namespace TodoListWebApp.Controllers
 
                 try
                 {
+                    // todo: ADAL
                     string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
-                    AuthenticationContext authContext = new AuthenticationContext(Startup.Authority, new NaiveSessionCache(userObjectID));
-                    ClientCredential credential = new ClientCredential(clientId, appKey);
-                    result = await authContext.AcquireTokenSilentAsync(todoListResourceId, credential, new UserIdentifier(userObjectID, UserIdentifierType.UniqueId));
+                    var upn = ClaimsPrincipal.Current.FindFirst("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn").Value;
 
+                    var msal = MsalBuilder.Get(userObjectID);
+                    result = await msal.AcquireTokenSilent(
+                        new[] { $"{todoListResourceId}/.default" },
+                        upn)
+                    .ExecuteAsync();
 
+                    //result = await authContext.AcquireTokenSilentAsync(todoListResourceId, credential, new UserIdentifier(userObjectID, UserIdentifierType.UniqueId));
 
                     // Forms encode todo item, to POST to the todo list web api.
                     HttpContent content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("Title", item) });
@@ -183,10 +192,6 @@ namespace TodoListWebApp.Controllers
                         //
                         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                         {
-                            var todoTokens = authContext.TokenCache.ReadItems().Where(a => a.Resource == todoListResourceId);
-                            foreach (TokenCacheItem tci in todoTokens)
-                                authContext.TokenCache.DeleteItem(tci);  
-
                             ViewBag.ErrorMessage = "UnexpectedError";
                             TodoItem newItem = new TodoItem();
                             newItem.Title = "(No items in list)";
@@ -196,7 +201,7 @@ namespace TodoListWebApp.Controllers
                     }
 
                 }
-                catch (AdalException ee)
+                catch (Exception)
                 {
                     //
                     // The user needs to re-authorize.  Show them a message to that effect.
@@ -217,5 +222,5 @@ namespace TodoListWebApp.Controllers
 
             return View("Error");
         }
-	}
+    }
 }

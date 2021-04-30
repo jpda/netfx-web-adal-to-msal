@@ -26,35 +26,29 @@ using Microsoft.Owin.Security.Cookies;
 using Microsoft.Owin.Security.OpenIdConnect;
 using System.Configuration;
 using System.Globalization;
-using Microsoft.IdentityModel.Clients.ActiveDirectory;
+
 using System.Threading.Tasks;
 using TodoListWebApp.Utils;
 using System.Security.Claims;
 using Microsoft.Owin.Security.Notifications;
 using Microsoft.IdentityModel.Protocols;
+using Microsoft.Identity.Client;
 
 namespace TodoListWebApp
 {
     public partial class Startup
     {
-        //
-        // The Client ID is used by the application to uniquely identify itself to Azure AD.
-        // The App Key is a credential used to authenticate the application to Azure AD.  Azure AD supports password and certificate credentials.
-        // The Metadata Address is used by the application to retrieve the signing keys used by Azure AD.
-        // The AAD Instance is the instance of Azure, for example public Azure or Azure China.
-        // The Authority is the sign-in URL of the tenant.
-        // The Post Logout Redirect Uri is the URL where the user will be redirected after they sign out.
-        //
         private static string clientId = ConfigurationManager.AppSettings["ida:ClientId"];
         private static string appKey = ConfigurationManager.AppSettings["ida:AppKey"];
         private static string aadInstance = ConfigurationManager.AppSettings["ida:AADInstance"];
         private static string tenant = ConfigurationManager.AppSettings["ida:Tenant"];
         private static string redirectUri = ConfigurationManager.AppSettings["ida:RedirectUri"];
+        private static string todoListApiResource = ConfigurationManager.AppSettings["todo:TodoListResourceid"];
 
         public static readonly string Authority = String.Format(CultureInfo.InvariantCulture, aadInstance, tenant);
 
         // This is the resource ID of the AAD Graph API.  We'll need this to request a token to call the Graph API.
-        string graphResourceId = ConfigurationManager.AppSettings["ida:GraphResourceId"];
+        static string graphResourceId = ConfigurationManager.AppSettings["ida:GraphResourceId"];
 
         public void ConfigureAuth(IAppBuilder app)
         {
@@ -76,13 +70,31 @@ namespace TodoListWebApp
                         // If there is a code in the OpenID Connect response, redeem it for an access token and refresh token, and store those away.
                         //
                         AuthorizationCodeReceived = OnAuthorizationCodeReceived,
-                        AuthenticationFailed = OnAuthenticationFailed
+                        AuthenticationFailed = OnAuthenticationFailed,
+                        RedirectToIdentityProvider = ctx =>
+                        {
+                            var properties = ctx.OwinContext.Authentication.AuthenticationResponseChallenge.Properties;
+                            if (properties.Dictionary.TryGetValue("scopeNeeded", out var scope))
+                            {
+                                //ctx.ProtocolMessage.Scope = scope;
+                                ctx.ProtocolMessage.Resource = scope;
+                            }
+                            return Task.FromResult(0);
+                        },
+                        SecurityTokenValidated = async ctx =>
+                        {
+                            //var oid = ctx.AuthenticationTicket.Identity.Claims.SingleOrDefault(x => x.Type == "http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
+                            //var upn = ctx.AuthenticationTicket.Identity.Claims.SingleOrDefault(x => x.Type == "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn").Value;
+                            //var msal = MsalBuilder.Get(oid);
+                            //var homeAccount = await msal.GetAccountAsync(upn);
+                            //ctx.AuthenticationTicket.Identity.AddClaim(new Claim("msalObjectId", homeAccount.HomeAccountId.Identifier));
+                        }
                     }
-
                 });
         }
 
-        private static Task OnAuthenticationFailed(AuthenticationFailedNotification<OpenIdConnectMessage, OpenIdConnectAuthenticationOptions> context)
+        private Task OnAuthenticationFailed(AuthenticationFailedNotification
+            <Microsoft.IdentityModel.Protocols.OpenIdConnect.OpenIdConnectMessage, OpenIdConnectAuthenticationOptions> context)
         {
             context.HandleResponse();
             context.Response.Redirect("/Home/Error?message=" + context.Exception.Message);
@@ -92,16 +104,56 @@ namespace TodoListWebApp
         private static async Task OnAuthorizationCodeReceived(AuthorizationCodeReceivedNotification context)
         {
             var code = context.Code;
-
-            ClientCredential credential = new ClientCredential(clientId, appKey);
             string userObjectID = context.AuthenticationTicket.Identity.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
-            AuthenticationContext authContext = new AuthenticationContext(Authority, new NaiveSessionCache(userObjectID));
+            var httpContext = (context.OwinContext.Environment["System.Web.HttpContextBase"] as HttpContextBase).ApplicationInstance.Context;
 
-            // If you create the redirectUri this way, it will contain a trailing slash.  
-            // Make sure you've registered the same exact Uri in the Azure Portal (including the slash).
-            Uri uri = new Uri(HttpContext.Current.Request.Url.GetLeftPart(UriPartial.Path));
+            var resource = $"{graphResourceId}";
 
-            AuthenticationResult result = await authContext.AcquireTokenByAuthorizationCodeAsync(code, uri, credential, graphResourceId);
+            if (context.AuthenticationTicket.Properties != null)
+            {
+                var properties = context.AuthenticationTicket.Properties;
+                if (properties.Dictionary.TryGetValue("scopeNeeded", out var scope))
+                {
+                    //ctx.ProtocolMessage.Scope = scope;
+                    resource = $"{scope}/.default";
+                }
+            }
+
+            var msal = MsalBuilder.Get(userObjectID, httpContext);
+            await msal.AcquireTokenByAuthorizationCode(new[] { $"{resource}/.default" }, code).ExecuteAsync();
+            var accounts = await msal.GetAccountsAsync();
+            context.AuthenticationTicket.Identity.AddClaim(new Claim("HomeAccountId", accounts.First().HomeAccountId.Identifier));
+        }
+    }
+
+    public static class MsalBuilder
+    {
+        private static string clientId = ConfigurationManager.AppSettings["ida:ClientId"];
+        private static string appKey = ConfigurationManager.AppSettings["ida:AppKey"];
+        private static string aadInstance = ConfigurationManager.AppSettings["ida:AADInstance"];
+        private static string tenant = ConfigurationManager.AppSettings["ida:Tenant"];
+        private static string redirectUri = ConfigurationManager.AppSettings["ida:RedirectUri"];
+        private static string todoListApiResource = ConfigurationManager.AppSettings["todo:TodoListResourceid"];
+        public static readonly string Authority = String.Format(CultureInfo.InvariantCulture, aadInstance, tenant);
+
+        public static IConfidentialClientApplication Get()
+        {
+            string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
+            return Get(userObjectID, HttpContext.Current);
+        }
+
+        public static IConfidentialClientApplication Get(string userObjectId = "", HttpContext context = null)
+        {
+            var msal = ConfidentialClientApplicationBuilder.Create(clientId)
+                  .WithClientSecret(appKey)
+                  .WithAuthority(Authority)
+                  .WithRedirectUri(redirectUri)
+                  .Build();
+
+            var tokenCache = new NaiveSessionCache(userObjectId, context ?? HttpContext.Current);
+            msal.UserTokenCache.SetAfterAccess(tokenCache.Persist);
+            msal.UserTokenCache.SetBeforeAccess(tokenCache.Load);
+            return msal;
         }
     }
 }

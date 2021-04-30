@@ -31,8 +31,8 @@ using System.Net.Http.Headers;
 using Newtonsoft.Json;
 using TodoListWebApp.Utils;
 using System.Configuration;
-using Microsoft.IdentityModel.Clients.ActiveDirectory;
 using Microsoft.Owin.Security;
+using Microsoft.Identity.Client;
 
 namespace TodoListWebApp.Controllers
 {
@@ -57,11 +57,16 @@ namespace TodoListWebApp.Controllers
 
             try
             {
-                string tenantId = ClaimsPrincipal.Current.FindFirst(TenantIdClaimType).Value;
+                // todo: ADAL
+                //string tenantId = ClaimsPrincipal.Current.FindFirst(TenantIdClaimType).Value;
                 string userObjectID = ClaimsPrincipal.Current.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier").Value;
-                AuthenticationContext authContext = new AuthenticationContext(Startup.Authority, new NaiveSessionCache(userObjectID));
-                ClientCredential credential = new ClientCredential(clientId, appKey);
-                result = await authContext.AcquireTokenSilentAsync(graphResourceId, credential, new UserIdentifier(userObjectID, UserIdentifierType.UniqueId));
+                var upn = ClaimsPrincipal.Current.FindFirst("HomeAccountId").Value;
+
+                var msal = MsalBuilder.Get(userObjectID);
+                result = await msal.AcquireTokenSilent(
+                    new[] { $"{graphResourceId}/access" },
+                    await msal.GetAccountAsync(upn))
+                .ExecuteAsync();
 
                 //
                 // Call the Graph API and retrieve the user's profile.
@@ -69,7 +74,9 @@ namespace TodoListWebApp.Controllers
                 string requestUrl = String.Format(
                     CultureInfo.InvariantCulture,
                     graphUserUrl,
-                    HttpUtility.UrlEncode(tenantId));
+                    HttpUtility.UrlEncode("")
+                    )
+                    ;
                 HttpClient client = new HttpClient();
                 HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", result.AccessToken);
@@ -88,10 +95,6 @@ namespace TodoListWebApp.Controllers
                     //
                     // If the call failed, then drop the current access token and show the user an error indicating they might need to sign-in again.
                     //
-                    var todoTokens = authContext.TokenCache.ReadItems().Where(a => a.Resource == graphResourceId);
-                    foreach (TokenCacheItem tci in todoTokens)
-                        authContext.TokenCache.DeleteItem(tci);
-
                     profile = new UserProfile();
                     profile.DisplayName = " ";
                     profile.GivenName = " ";
@@ -101,7 +104,7 @@ namespace TodoListWebApp.Controllers
 
                 return View(profile);
             }
-            catch (AdalException ee)
+            catch (Exception ex)
             {
                 //
                 // If the user doesn't have an access token, they need to re-authorize.
